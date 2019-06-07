@@ -1,0 +1,363 @@
+﻿using System;
+using System.Collections.Generic;
+using System.DirectoryServices;
+using System.DirectoryServices.ActiveDirectory;
+using System.Linq;
+using System.Security.Principal;
+using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace ADTest
+{
+    public class ActiveDirectoryUserService : IActiveDirectoryUserService
+    {
+        private const int MaximumUsers = 21; // 20 users are displayed at once, but 21 are retrieved to determine if more hits do exist
+
+        private readonly ILogger logger;
+
+        private readonly ActiveDirectorySettings activeDirectorySettings;
+
+        public ActiveDirectoryUserService(ILogger<ActiveDirectoryUserService> logger, IOptions<ActiveDirectorySettings> optionsAccessor)
+        {
+            this.logger = logger;
+            this.activeDirectorySettings = optionsAccessor.Value;
+        }
+
+        public ActiveDirectoryUser FindByLogin(string loginName)
+        {
+            if (loginName == null)
+            {
+                throw new ArgumentNullException(nameof(loginName));
+            }
+
+            loginName = loginName.ToLowerInvariant();
+
+            int indexOfBackslash = loginName.IndexOf("\\");
+            string samaccountname = EscapeLdapSearchFilter(loginName.Substring(indexOfBackslash + 1));
+
+            using (DirectorySearcher directorySearcher = this.CreateDirectorySearcher())
+            {
+                ConfigureDirectorySearcher(directorySearcher);
+
+                directorySearcher.Filter = "(&(objectCategory=Person)(objectClass=User)(!userAccountControl:1.2.840.113556.1.4.803:=2)(samaccountname=" + samaccountname + "))";
+
+                try
+                {
+                    foreach (SearchResult principal in directorySearcher.FindAll())
+                    {
+                        using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
+                        {
+                            var user = this.Convert(directoryEntry, true);
+
+                            if (user.LoginName == loginName)
+                            {
+                                return user;
+                            }
+                        }
+                    }
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+            }
+
+            return null;
+        }
+
+        public IEnumerable<ActiveDirectoryUser> FindMatchingUsers(string filterText)
+        {
+            List<ActiveDirectoryUser> users = new List<ActiveDirectoryUser>();
+
+            if (filterText == null || filterText.Length < 3)
+            {
+                return users;
+            }
+
+            filterText = EscapeLdapSearchFilter(filterText);
+
+            using (DirectorySearcher directorySearcher = this.CreateDirectorySearcher())
+            {
+                directorySearcher.Sort = new SortOption("name", SortDirection.Ascending);
+
+                ConfigureDirectorySearcher(directorySearcher);
+                directorySearcher.Filter = "(&(&(objectCategory=Person)(objectClass=User)(!userAccountControl:1.2.840.113556.1.4.803:=2))(|(name=" + filterText + "*)(sn=" + filterText + "*)(givenName=" + filterText + "*)(mail=" + filterText + "*)))";
+
+                try
+                {
+                    foreach (SearchResult principal in directorySearcher.FindAll())
+                    {
+                        using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
+                        {
+                            var activeDirectoryUser = this.Convert(directoryEntry, false);
+
+                            if (activeDirectoryUser.Email == null)
+                            {
+                                continue;
+                            }
+
+                            users.Add(activeDirectoryUser);
+                        }
+
+                        if (users.Count == MaximumUsers)
+                        {
+                            break;
+                        }
+                    }
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+            }
+
+            return users.OrderBy(u => u.DisplayName);
+        }
+
+        public IEnumerable<ActiveDirectoryUser> FindMatchingUsersByGroup(string groupName)
+        {
+            if (groupName == null)
+            {
+                throw new ArgumentNullException(nameof(groupName));
+            }
+
+            var groups = new HashSet<string>();
+            this.AddGroups(groups, groupName, false);
+
+            List<ActiveDirectoryUser> users = new List<ActiveDirectoryUser>();
+
+            if (groups.Count == 0)
+            {
+                return users;
+            }
+
+            string groupsQuery = $"(memberof:1.2.840.113556.1.4.1941:={groups.First()})";
+
+            this.logger.LogInformation($"QUERY: {groupsQuery}");
+
+            using (DirectorySearcher directorySearcher = this.CreateDirectorySearcher())
+            {
+                directorySearcher.Sort = new SortOption("name", SortDirection.Ascending);
+
+                ConfigureDirectorySearcher(directorySearcher);
+                // See: https://ldapwiki.com/wiki/Active%20Directory%20Group%20Related%20Searches
+                directorySearcher.Filter = $"(&(objectCategory=Person)(objectClass=User)(!userAccountControl:1.2.840.113556.1.4.803:=2){groupsQuery})";
+
+                try
+                {
+                    foreach (SearchResult principal in directorySearcher.FindAll())
+                    {
+                        using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
+                        {
+                            var activeDirectoryUser = this.Convert(directoryEntry, false);
+
+                            if (activeDirectoryUser.Email == null)
+                            {
+                                continue;
+                            }
+
+                            users.Add(activeDirectoryUser);
+                        }
+                    }
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+            }
+
+            return users;
+        }
+
+        public IEnumerable<string> GetGroupWithChildGroups(string groupName)
+        {
+            HashSet<string> groups = new HashSet<string>();
+            this.AddGroups(groups, groupName, true);
+
+            return groups;
+        }
+
+        private void AddGroups(HashSet<string> groups, string groupName, bool recursive)
+        {
+            using (DirectorySearcher directorySearcher = this.CreateDirectorySearcher())
+            {
+                directorySearcher.PropertiesToLoad.Add("distinguishedName");
+
+                if (groupName.StartsWith("CN"))
+                {
+                    directorySearcher.Filter = "(&(objectcategory=group)(memberOf=" + groupName + "))";
+                }
+                else
+                {
+                    directorySearcher.Filter = "(&(objectcategory=group)(CN=" + groupName + "))";
+                }
+
+                try
+                {
+                    foreach (SearchResult principal in directorySearcher.FindAll())
+                    {
+                        using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
+                        {
+                            string distinguishedName = GetValue<string>(directoryEntry, "distinguishedName");
+                            if (!groups.Contains(distinguishedName))
+                            {
+                                groups.Add(distinguishedName);
+
+                                if (recursive)
+                                {
+                                    this.AddGroups(groups, distinguishedName, recursive);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+            }
+        }
+
+        private static void ConfigureDirectorySearcher(DirectorySearcher directorySearcher)
+        {
+            directorySearcher.ReferralChasing = ReferralChasingOption.All;
+            directorySearcher.PropertiesToLoad.Add("givenName");   // first name
+            directorySearcher.PropertiesToLoad.Add("sn");          // last name
+            directorySearcher.PropertiesToLoad.Add("name");
+            directorySearcher.PropertiesToLoad.Add("mail");
+            directorySearcher.PropertiesToLoad.Add("objectsid");
+        }
+
+        private static T GetValue<T>(DirectoryEntry entry, string name)
+        {
+            PropertyValueCollection values = entry.Properties[name];
+
+            if (values == null || values.Count == 0)
+            {
+                return default(T);
+            }
+            else
+            {
+                return (T)values.Value;
+            }
+        }
+
+        private static object[] GetValues(DirectoryEntry entry, string name)
+        {
+            PropertyValueCollection values = entry.Properties[name];
+
+            if (values == null || values.Count == 0)
+            {
+                return new object[0];
+            }
+            else if (values.Count == 1)
+            {
+                return new object[] { values.Value };
+            }
+            else
+            {
+                return (object[])values.Value;
+            }
+        }
+
+        /// <summary>
+        /// Escapes the LDAP search filter to prevent LDAP injection attacks.
+        /// </summary>
+        /// <param name="searchFilter">The search filter.</param>
+        /// <see cref="https://blogs.oracle.com/shankar/entry/what_is_ldap_injection" />
+        /// <see cref="http://msdn.microsoft.com/en-us/library/aa746475.aspx" />
+        /// <returns>The escaped search filter.</returns>
+        private static string EscapeLdapSearchFilter(string searchFilter)
+        {
+            StringBuilder escape = new StringBuilder();
+            for (int i = 0; i < searchFilter.Length; ++i)
+            {
+                char current = searchFilter[i];
+                switch (current)
+                {
+                    case '\\':
+                        escape.Append(@"\5c");
+                        break;
+                    case '*':
+                        escape.Append(@"\2a");
+                        break;
+                    case '(':
+                        escape.Append(@"\28");
+                        break;
+                    case ')':
+                        escape.Append(@"\29");
+                        break;
+                    case '\u0000':
+                        escape.Append(@"\00");
+                        break;
+                    case '/':
+                        escape.Append(@"\2f");
+                        break;
+                    default:
+                        escape.Append(current);
+                        break;
+                }
+            }
+
+            return escape.ToString();
+        }
+
+        private ActiveDirectoryUser Convert(DirectoryEntry user, bool includeActiveDirectoryGroups)
+        {
+            ActiveDirectoryUser activeDirectoryUser = new ActiveDirectoryUser();
+            activeDirectoryUser.FirstName = GetValue<string>(user, "givenName");
+            activeDirectoryUser.LastName = GetValue<string>(user, "sn");
+            activeDirectoryUser.DisplayName = GetValue<string>(user, "name");
+            activeDirectoryUser.Email = GetValue<string>(user, "mail");
+
+            var userGroups = new HashSet<string>();
+
+            if (includeActiveDirectoryGroups)
+            {
+                user.RefreshCache(new string[] { "tokenGroups" });
+
+                for (int i = 0; i < user.Properties["tokenGroups"].Count; i++)
+                {
+                    try
+                    {
+                        SecurityIdentifier sidTokenGroup = new SecurityIdentifier((byte[])user.Properties["tokenGroups"][i], 0);
+                        NTAccount nt = (NTAccount)sidTokenGroup.Translate(typeof(NTAccount));
+
+                        string name = nt.Value.Substring(nt.Value.IndexOf('\\') + 1);
+
+                        if (name.Length > 0 && name[0] != '.')
+                        {
+                            name = "*" + name;
+                        }
+
+                        userGroups.Add(name);
+                    }
+                    catch (Exception ex)
+                    {
+                        this.logger.LogError(ex, $"Failed to resolve AD-Group for token (Index: {i})");
+                    }
+                }
+            }
+
+            activeDirectoryUser.Groups = userGroups;
+
+            byte[] objectsid = GetValue<byte[]>(user, "objectsid");
+            SecurityIdentifier sid = new SecurityIdentifier(objectsid, 0);
+
+            activeDirectoryUser.LoginName = ((NTAccount)sid.Translate(typeof(NTAccount))).ToString();
+
+            return activeDirectoryUser;
+        }
+
+        private DirectorySearcher CreateDirectorySearcher()
+        {
+            if (!string.IsNullOrEmpty(this.activeDirectorySettings.LdapConnectionString))
+            {
+                return new DirectorySearcher(new DirectoryEntry(this.activeDirectorySettings.LdapConnectionString));
+            }
+            else
+            {
+                Forest currentForest = Forest.GetCurrentForest();
+                GlobalCatalog globalCatalog = currentForest.FindGlobalCatalog();
+                return globalCatalog.GetDirectorySearcher();
+            }
+        }
+    }
+}

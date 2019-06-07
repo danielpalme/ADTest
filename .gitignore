@@ -1,0 +1,6 @@
+/.vs/*
+*.suo
+*.user
+ADTest/bin/*
+ADTest/obj/*
+*.Cache
