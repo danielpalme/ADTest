@@ -19,7 +19,8 @@ namespace ADTest
             {
                 Console.WriteLine("-users SEARCH");
                 Console.WriteLine("-userdetails LOGINNAME");
-                Console.WriteLine("-group GROUP");
+                Console.WriteLine("-groups GROUP");
+                Console.WriteLine("-groupsrecursive GROUP");
                 Console.WriteLine("-usersingroup GROUP");
 
                 return;
@@ -30,7 +31,7 @@ namespace ADTest
 
             var serviceProvider = serviceCollection.BuildServiceProvider();
 
-            var activeDirectoryUserService = serviceProvider.GetService<IActiveDirectoryUserService>();
+            var activeDirectoryUserService = serviceProvider.GetService<IActiveDirectoryService>();
 
             if (args[0] == "-users")
             {
@@ -50,7 +51,7 @@ namespace ADTest
             }
             else if (args[0] == "-userdetails")
             {
-                var user = activeDirectoryUserService.FindByLogin(args[1]);
+                var user = activeDirectoryUserService.GetByLogin(args[1]);
 
                 if (user == null)
                 {
@@ -71,19 +72,35 @@ namespace ADTest
                     }
                 }
             }
-            else if (args[0] == "-group")
+            else if (args[0] == "-groups")
             {
-                var groups = activeDirectoryUserService.GetGroupWithChildGroups(args[1]);
+                var groups = activeDirectoryUserService.FindMatchingGroups(args[1]);
 
                 if (!groups.Any())
                 {
-                    Console.WriteLine("No group found.");
+                    Console.WriteLine("No groups found.");
                 }
                 else
                 {
                     foreach (var group in groups)
                     {
-                        Console.WriteLine(group);
+                        Console.WriteLine($"{group.Name} ({group.DistinguishedName})");
+                    }
+                }
+            }
+            else if (args[0] == "-groupsrecursive")
+            {
+                var groups = activeDirectoryUserService.GetGroups(args[1], true);
+
+                if (!groups.Any())
+                {
+                    Console.WriteLine("No groups found.");
+                }
+                else
+                {
+                    foreach (var group in groups)
+                    {
+                        Console.WriteLine($"{group.Name} ({group.DistinguishedName})");
                     }
                 }
             }
@@ -117,7 +134,7 @@ namespace ADTest
                 .AddConsole());
 
             services.Configure<ActiveDirectorySettings>(configuration.GetSection("ActiveDirectorySettings"));
-            services.AddTransient<IActiveDirectoryUserService, ActiveDirectoryUserService>();
+            services.AddTransient<IActiveDirectoryService, ActiveDirectoryService>();
         }
     }
 }

@@ -10,21 +10,21 @@ using Microsoft.Extensions.Options;
 
 namespace ADTest
 {
-    public class ActiveDirectoryUserService : IActiveDirectoryUserService
+    public class ActiveDirectoryService : IActiveDirectoryService
     {
-        private const int MaximumUsers = 21; // 20 users are displayed at once, but 21 are retrieved to determine if more hits do exist
+        private const int MaximumItems = 21; // 20 items are displayed at once, but 21 are retrieved to determine if more hits do exist
 
         private readonly ILogger logger;
 
         private readonly ActiveDirectorySettings activeDirectorySettings;
 
-        public ActiveDirectoryUserService(ILogger<ActiveDirectoryUserService> logger, IOptions<ActiveDirectorySettings> optionsAccessor)
+        public ActiveDirectoryService(ILogger<ActiveDirectoryService> logger, IOptions<ActiveDirectorySettings> optionsAccessor)
         {
             this.logger = logger;
             this.activeDirectorySettings = optionsAccessor.Value;
         }
 
-        public ActiveDirectoryUser FindByLogin(string loginName)
+        public ActiveDirectoryUser GetByLogin(string loginName)
         {
             if (loginName == null)
             {
@@ -99,7 +99,7 @@ namespace ADTest
                             users.Add(activeDirectoryUser);
                         }
 
-                        if (users.Count == MaximumUsers)
+                        if (users.Count >= MaximumItems)
                         {
                             break;
                         }
@@ -120,8 +120,8 @@ namespace ADTest
                 throw new ArgumentNullException(nameof(groupName));
             }
 
-            var groups = new HashSet<string>();
-            this.AddGroups(groups, groupName, false);
+            var groups = new HashSet<ActiveDirectoryGroup>();
+            this.AddGroups(groups, groupName, false, true);
 
             List<ActiveDirectoryUser> users = new List<ActiveDirectoryUser>();
 
@@ -130,7 +130,7 @@ namespace ADTest
                 return users;
             }
 
-            string groupsQuery = $"(memberof:1.2.840.113556.1.4.1941:={groups.First()})";
+            string groupsQuery = $"(memberof:1.2.840.113556.1.4.1941:={groups.First().DistinguishedName})";
 
             this.logger.LogInformation($"QUERY: {groupsQuery}");
 
@@ -167,18 +167,39 @@ namespace ADTest
             return users;
         }
 
-        public IEnumerable<string> GetGroupWithChildGroups(string groupName)
+        public IEnumerable<ActiveDirectoryGroup> FindMatchingGroups(string filterText)
         {
-            HashSet<string> groups = new HashSet<string>();
-            this.AddGroups(groups, groupName, true);
+            HashSet<ActiveDirectoryGroup> groups = new HashSet<ActiveDirectoryGroup>();
+
+            if (filterText == null || filterText.Length < 3)
+            {
+                return groups;
+            }
+
+            int indexOfBackslash = filterText.IndexOf("\\");
+            filterText = "*" + EscapeLdapSearchFilter(filterText.Substring(indexOfBackslash + 1)) + "*";
+
+            this.AddGroups(groups, filterText, false, true);
 
             return groups;
         }
 
-        private void AddGroups(HashSet<string> groups, string groupName, bool recursive)
+        public IEnumerable<ActiveDirectoryGroup> GetGroups(string groupName, bool recursice)
+        {
+            int indexOfBackslash = groupName.IndexOf("\\");
+            groupName = EscapeLdapSearchFilter(groupName.Substring(indexOfBackslash + 1));
+
+            HashSet<ActiveDirectoryGroup> groups = new HashSet<ActiveDirectoryGroup>();
+            this.AddGroups(groups, groupName, recursice, false);
+
+            return groups;
+        }
+
+        private void AddGroups(HashSet<ActiveDirectoryGroup> groups, string groupName, bool recursive, bool limit)
         {
             using (DirectorySearcher directorySearcher = this.CreateDirectorySearcher())
             {
+                directorySearcher.PropertiesToLoad.Add("name");
                 directorySearcher.PropertiesToLoad.Add("distinguishedName");
 
                 if (groupName.StartsWith("CN"))
@@ -196,14 +217,29 @@ namespace ADTest
                     {
                         using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
                         {
-                            string distinguishedName = GetValue<string>(directoryEntry, "distinguishedName");
-                            if (!groups.Contains(distinguishedName))
+                            var activeDirectoryGroup = new ActiveDirectoryGroup()
                             {
-                                groups.Add(distinguishedName);
+                                Name = GetValue<string>(directoryEntry, "name"),
+                                DistinguishedName = GetValue<string>(directoryEntry, "distinguishedName")
+                            };
+
+                            if (activeDirectoryGroup.Name.Length > 0 && activeDirectoryGroup.Name[0] != '.' && activeDirectoryGroup.Name[0] != '*')
+                            {
+                                activeDirectoryGroup.Name = "*" + activeDirectoryGroup.Name;
+                            }
+
+                            if (!groups.Contains(activeDirectoryGroup))
+                            {
+                                groups.Add(activeDirectoryGroup);
+
+                                if (limit && groups.Count >= MaximumItems)
+                                {
+                                    break;
+                                }
 
                                 if (recursive)
                                 {
-                                    this.AddGroups(groups, distinguishedName, recursive);
+                                    this.AddGroups(groups, activeDirectoryGroup.DistinguishedName, recursive, limit);
                                 }
                             }
                         }
@@ -301,11 +337,13 @@ namespace ADTest
 
         private ActiveDirectoryUser Convert(DirectoryEntry user, bool includeActiveDirectoryGroups)
         {
-            ActiveDirectoryUser activeDirectoryUser = new ActiveDirectoryUser();
-            activeDirectoryUser.FirstName = GetValue<string>(user, "givenName");
-            activeDirectoryUser.LastName = GetValue<string>(user, "sn");
-            activeDirectoryUser.DisplayName = GetValue<string>(user, "name");
-            activeDirectoryUser.Email = GetValue<string>(user, "mail");
+            ActiveDirectoryUser activeDirectoryUser = new ActiveDirectoryUser()
+            {
+                FirstName = GetValue<string>(user, "givenName"),
+                LastName = GetValue<string>(user, "sn"),
+                DisplayName = GetValue<string>(user, "name"),
+                Email = GetValue<string>(user, "mail")
+            };
 
             var userGroups = new HashSet<string>();
 
@@ -322,7 +360,7 @@ namespace ADTest
 
                         string name = nt.Value.Substring(nt.Value.IndexOf('\\') + 1);
 
-                        if (name.Length > 0 && name[0] != '.')
+                        if (name.Length > 0 && name[0] != '.' && name[0] != '*')
                         {
                             name = "*" + name;
                         }
