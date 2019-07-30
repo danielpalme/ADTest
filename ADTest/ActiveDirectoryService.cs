@@ -230,10 +230,16 @@ namespace ADTest
 
                             if (includeDomain)
                             {
-                                SecurityIdentifier sidTokenGroup = new SecurityIdentifier(GetValue<byte[]>(directoryEntry, "objectSid"), 0);
-                                NTAccount nt = (NTAccount)sidTokenGroup.Translate(typeof(NTAccount));
+                                try
+                                {
+                                    SecurityIdentifier sidTokenGroup = new SecurityIdentifier(GetValue<byte[]>(directoryEntry, "objectsid"), 0);
+                                    NTAccount nt = (NTAccount)sidTokenGroup.Translate(typeof(NTAccount));
 
-                                activeDirectoryGroup.Name = nt.Value.Substring(0, nt.Value.IndexOf('\\') + 1) + activeDirectoryGroup.Name;
+                                    activeDirectoryGroup.Name = nt.Value.Substring(0, nt.Value.IndexOf('\\') + 1) + activeDirectoryGroup.Name;
+                                }
+                                catch (IdentityNotMappedException)
+                                {
+                                }
                             }
 
                             if (!groups.Contains(activeDirectoryGroup))
