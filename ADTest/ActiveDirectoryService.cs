@@ -48,7 +48,7 @@ namespace ADTest
                     {
                         using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
                         {
-                            var user = this.Convert(directoryEntry, true);
+                            var user = this.Convert(directoryEntry, true, true);
 
                             if (user.LoginName == loginName)
                             {
@@ -89,7 +89,7 @@ namespace ADTest
                     {
                         using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
                         {
-                            var activeDirectoryUser = this.Convert(directoryEntry, false);
+                            var activeDirectoryUser = this.Convert(directoryEntry, false, false);
 
                             if (activeDirectoryUser.Email == null)
                             {
@@ -121,7 +121,7 @@ namespace ADTest
             }
 
             var groups = new HashSet<ActiveDirectoryGroup>();
-            this.AddGroups(groups, groupName, false, true);
+            this.AddGroups(groups, groupName, false, true, true);
 
             List<ActiveDirectoryUser> users = new List<ActiveDirectoryUser>();
 
@@ -148,7 +148,7 @@ namespace ADTest
                     {
                         using (DirectoryEntry directoryEntry = principal.GetDirectoryEntry())
                         {
-                            var activeDirectoryUser = this.Convert(directoryEntry, false);
+                            var activeDirectoryUser = this.Convert(directoryEntry, false, false);
 
                             if (activeDirectoryUser.Email == null)
                             {
@@ -179,7 +179,7 @@ namespace ADTest
             int indexOfBackslash = filterText.IndexOf("\\");
             filterText = "*" + EscapeLdapSearchFilter(filterText.Substring(indexOfBackslash + 1)) + "*";
 
-            this.AddGroups(groups, filterText, false, true);
+            this.AddGroups(groups, filterText, false, true, true);
 
             return groups;
         }
@@ -190,12 +190,12 @@ namespace ADTest
             groupName = EscapeLdapSearchFilter(groupName.Substring(indexOfBackslash + 1));
 
             HashSet<ActiveDirectoryGroup> groups = new HashSet<ActiveDirectoryGroup>();
-            this.AddGroups(groups, groupName, recursice, false);
+            this.AddGroups(groups, groupName, recursice, false, true);
 
             return groups;
         }
 
-        private void AddGroups(HashSet<ActiveDirectoryGroup> groups, string groupName, bool recursive, bool limit)
+        private void AddGroups(HashSet<ActiveDirectoryGroup> groups, string groupName, bool recursive, bool limit, bool includeDomain)
         {
             using (DirectorySearcher directorySearcher = this.CreateDirectorySearcher())
             {
@@ -228,6 +228,14 @@ namespace ADTest
                                 activeDirectoryGroup.Name = "*" + activeDirectoryGroup.Name;
                             }
 
+                            if (includeDomain)
+                            {
+                                SecurityIdentifier sidTokenGroup = new SecurityIdentifier(GetValue<byte[]>(directoryEntry, "objectSid"), 0);
+                                NTAccount nt = (NTAccount)sidTokenGroup.Translate(typeof(NTAccount));
+
+                                activeDirectoryGroup.Name = nt.Value.Substring(0, nt.Value.IndexOf('\\') + 1) + activeDirectoryGroup.Name;
+                            }
+
                             if (!groups.Contains(activeDirectoryGroup))
                             {
                                 groups.Add(activeDirectoryGroup);
@@ -239,7 +247,7 @@ namespace ADTest
 
                                 if (recursive)
                                 {
-                                    this.AddGroups(groups, activeDirectoryGroup.DistinguishedName, recursive, limit);
+                                    this.AddGroups(groups, activeDirectoryGroup.DistinguishedName, recursive, limit, includeDomain);
                                 }
                             }
                         }
@@ -335,7 +343,7 @@ namespace ADTest
             return escape.ToString();
         }
 
-        private ActiveDirectoryUser Convert(DirectoryEntry user, bool includeActiveDirectoryGroups)
+        private ActiveDirectoryUser Convert(DirectoryEntry user, bool includeActiveDirectoryGroups, bool includeDomain)
         {
             ActiveDirectoryUser activeDirectoryUser = new ActiveDirectoryUser()
             {
@@ -363,6 +371,11 @@ namespace ADTest
                         if (name.Length > 0 && name[0] != '.' && name[0] != '*')
                         {
                             name = "*" + name;
+                        }
+
+                        if (includeDomain)
+                        {
+                            name = nt.Value.Substring(0, nt.Value.IndexOf('\\') + 1) + name;
                         }
 
                         userGroups.Add(name);
