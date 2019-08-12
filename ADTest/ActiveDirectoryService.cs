@@ -120,12 +120,11 @@ namespace ADTest
                 throw new ArgumentNullException(nameof(groupName));
             }
 
-            var groups = new HashSet<ActiveDirectoryGroup>();
-            this.AddGroups(groups, groupName, false, true, true);
+            var groups = this.GetGroups(groupName, false);
 
             List<ActiveDirectoryUser> users = new List<ActiveDirectoryUser>();
 
-            if (groups.Count == 0)
+            if (!groups.Any())
             {
                 return users;
             }
